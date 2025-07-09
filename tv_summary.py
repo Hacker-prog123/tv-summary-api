@@ -9,8 +9,10 @@ def run_tv_summary(main_file_bytes, rr_file_bytes):
     rr_file = BytesIO(rr_file_bytes)
 
     df = pd.read_excel(main_file, sheet_name="TV")
+    df.columns = df.columns.str.strip()
     esn_df = pd.read_excel(main_file, sheet_name="ESN", usecols="B:E")
     rr_df_full = pd.read_excel(rr_file, sheet_name="Export")
+    rr_df_full.columns = rr_df_full.columns.str.strip()
 
     def clean_esn(val):
         val = str(val).strip().replace("\n", "").replace("\r", "").replace("\xa0", "").replace(" ", "")
