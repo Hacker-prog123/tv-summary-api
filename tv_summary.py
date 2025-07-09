@@ -1,60 +1,172 @@
+import pandas as pd
+from openpyxl import load_workbook
+from io import BytesIO
+
 def run_tv_summary(main_file_bytes, rr_file_bytes):
-    from io import BytesIO
-    import pandas as pd
+    try:
+        main_file = BytesIO(main_file_bytes)
+        rr_file = BytesIO(rr_file_bytes)
 
-    main_file = BytesIO(main_file_bytes)
-    rr_file = BytesIO(rr_file_bytes)
+        # Load and strip all relevant sheets
+        df = pd.read_excel(main_file, sheet_name="TV")
+        df.columns = df.columns.str.strip()
 
-    df = pd.read_excel(main_file, sheet_name="TV")
-    df.columns = df.columns.str.strip()
+        esn_df = pd.read_excel(main_file, sheet_name="ESN", usecols="B:E")
+        esn_df.columns = esn_df.columns.str.strip()
 
-    esn_df = pd.read_excel(main_file, sheet_name="ESN", usecols="B:E")
-    rr_df_full = pd.read_excel(rr_file, sheet_name="Export")
-    rr_df_full.columns = rr_df_full.columns.str.strip()
+        rr_df_full = pd.read_excel(rr_file, sheet_name="Export")
+        rr_df_full.columns = rr_df_full.columns.str.strip()
 
-    def clean_esn(val):
-        val = str(val).strip().replace("\n", "").replace("\r", "").replace("\xa0", "").replace(" ", "")
-        if val.replace("-", "", 1).isdigit():
+        # Clean ESN values
+        def clean_esn(val):
+            val = str(val).strip().replace("\n", "").replace("\r", "").replace("\xa0", "").replace(" ", "")
+            if val.replace('.', '', 1).isdigit():
+                val = str(int(float(val)))
             return val
-        return None
 
-    # Clean ESNs in RR data
-    rr_df_full["Engine Serial Number"] = rr_df_full["Engine Serial Number"].apply(clean_esn)
+        # --- Validate required columns ---
+        required_tv_cols = ["Engine Number (Ex)", "Custom ID", "Gate", "TVR Gate Raised", "SAESL Status"]
+        required_rr_cols = ["Engine Serial Number", "Tag delivered?", "TV NO", "Applicant"]
 
-    # Match ESNs by week
-    esn_df["Week"] = esn_df["Week"].fillna(method="ffill")
-    current_week_esns = esn_df[esn_df["Week"].str.contains("Week", na=False)]["Engine Serial Number"].astype(str).str.strip().tolist()
+        for col in required_tv_cols:
+            if col not in df.columns:
+                raise KeyError(f"Missing column in TV sheet: '{col}'")
+        for col in required_rr_cols:
+            if col not in rr_df_full.columns:
+                raise KeyError(f"Missing column in RR sheet: '{col}'")
 
-    # Strip and clean columns in df
-    df.columns = df.columns.str.strip()
-    df["Engine Number (Ex)"] = df["Engine Number (Ex)"].astype(str).str.strip()
+        # Apply ESN cleaning
+        df["Engine Number (Ex)"] = df["Engine Number (Ex)"].map(clean_esn)
+        rr_df_full["Engine Serial Number"] = rr_df_full["Engine Serial Number"].map(clean_esn)
 
-    # Classify delivery type
-    def classify_delivery_type(row):
-        if row["TV Clear"] == "Y":
-            return "TV Delivered"
-        elif row["TVR Gate Raise"] == 0:
-            return "TV Delivered"
-        elif row["TV Status"] == "Self Picked":
-            return "Self Picked"
-        else:
+        current_week_esns = pd.concat([esn_df[col] for col in esn_df.columns]).dropna().map(clean_esn).unique()
+        df_current_week = df[df["Engine Number (Ex)"].isin(current_week_esns)].copy()
+
+        # Classify Delivery Type
+        def classify_delivery_type(row):
+            status = str(row.get("SAESL Status", "")).strip()
+            gate = row.get("Gate", None)
+            tvr_gate = str(row.get("TVR Gate Raised", "")).strip().upper()
+
+            if pd.isna(status) or pd.isna(gate): return "Undelivered"
+            try: gate = int(gate)
+            except: return "Undelivered"
+
+            if gate == 1 and status == "Under Review (approved TV)": return "TV Delivered"
+            if gate == 1 and tvr_gate == "0": return "Undelivered"
+            if gate == 1 and tvr_gate == "1" and status == "Under Review (approved TV)": return "TV Delivered"
+            if gate == 1 and status == "Cleared" and tvr_gate == "G0": return "TV Delivered"
+            if gate == 2 and status == "Cleared" and tvr_gate in ["G0", "G1"]: return "TV Delivered"
+            if gate == 2 and status == "Under Review (approved TV)" and tvr_gate in ["G0", "G1"]: return "TV Delivered"
+            if gate in [1, 2] and status in ["Under Review (draft)", "Under Review (MP Release)", "Cleared", "Cleared Mitigated"]:
+                return "HU/Draft Delivered"
+            if gate in [3, 4] and status in ["Cleared", "Cleared Mitigated", "Under Review (approved TV)"]:
+                return "TV Delivered"
+            if status in ["Need HU", "Need Draft", "Draft Clarification", "Need Approved TV"]:
+                return "Undelivered"
             return "Undelivered"
 
-    # Assign 'Delivery Type' before filtering
-    df["Delivery Type"] = df.apply(classify_delivery_type, axis=1)
+        df["Delivery Type"] = df.apply(classify_delivery_type, axis=1)
 
-    # Filter to current week only
-    df_current_week = df[df["Engine Number (Ex)"].isin(current_week_esns)].copy()
-    df_current_week["ESN"] = df_current_week["Engine Number (Ex)"]
+        # Summary for current week
+        df_current_week["ESN"] = df_current_week["Engine Number (Ex)"]
+        current_week_summary = pd.DataFrame({
+            "Metric": ["Total ESNs in Current Week", "TV Delivered", "HU/Draft Delivered", "Undelivered", "Delivery Rate (%)"],
+            "Value": [
+                len(df_current_week),
+                (df_current_week["Delivery Type"] == "TV Delivered").sum(),
+                (df_current_week["Delivery Type"] == "HU/Draft Delivered").sum(),
+                (df_current_week["Delivery Type"] == "Undelivered").sum(),
+                round(df_current_week["Delivery Type"].isin(["TV Delivered", "HU/Draft Delivered"]).sum() / len(df_current_week) * 100, 2) if len(df_current_week) else 0
+            ]
+        })
 
-    # Summary logic (example)
-    tv_delivered = (df_current_week["Delivery Type"] == "TV Delivered").sum()
-    self_picked = (df_current_week["Delivery Type"] == "Self Picked").sum()
-    undelivered = (df_current_week["Delivery Type"] == "Undelivered").sum()
+        # Detail by ESN
+        current_week_detail = df_current_week.groupby(["ESN", "Gate"]).agg(
+            HU_Draft_Delivered=("Delivery Type", lambda x: (x == "HU/Draft Delivered").sum()),
+            TV_Delivered=("Delivery Type", lambda x: (x == "TV Delivered").sum()),
+            Undelivered=("Delivery Type", lambda x: (x == "Undelivered").sum())
+        ).reset_index()
+        current_week_detail["Total Delivered"] = current_week_detail["HU_Draft_Delivered"] + current_week_detail["TV_Delivered"]
+        current_week_detail["Total Count"] = current_week_detail["Total Delivered"] + current_week_detail["Undelivered"]
+        current_week_detail["Delivery %"] = round(current_week_detail["Total Delivered"] / current_week_detail["Total Count"] * 100, 2)
 
-    return {
-        "tv_delivered": int(tv_delivered),
-        "self_picked": int(self_picked),
-        "undelivered": int(undelivered),
-        "status": "success"
-    }
+        # Overall delivery breakdown
+        delivery_type_breakdown = df["Delivery Type"].value_counts().reset_index()
+        delivery_type_breakdown.columns = ["Delivery Type", "Count"]
+
+        # Gate performance
+        gate_perf_all = df.groupby("Gate").agg(
+            Total_TVs=("Custom ID", "count"),
+            Delivered=("Delivery Type", lambda x: x.isin(["TV Delivered", "HU/Draft Delivered"]).sum()),
+            TV_Delivered=("Delivery Type", lambda x: (x == "TV Delivered").sum()),
+            HU_Draft_Delivered=("Delivery Type", lambda x: (x == "HU/Draft Delivered").sum()),
+            Undelivered=("Delivery Type", lambda x: (x == "Undelivered").sum())
+        ).reset_index()
+        gate_perf_all["Delivery %"] = round(gate_perf_all["Delivered"] / gate_perf_all["Total_TVs"] * 100, 2)
+
+        # All summary
+        summary_all_df = pd.DataFrame({
+            "Metric": ["Total TVs in List", "Total Delivered (TV or HU)", "TV Delivered", "HU/Draft Delivered", "Total Undelivered", "Delivery Rate (%)"],
+            "Value": [
+                len(df),
+                df["Delivery Type"].isin(["TV Delivered", "HU/Draft Delivered"]).sum(),
+                (df["Delivery Type"] == "TV Delivered").sum(),
+                (df["Delivery Type"] == "HU/Draft Delivered").sum(),
+                (df["Delivery Type"] == "Undelivered").sum(),
+                round(df["Delivery Type"].isin(["TV Delivered", "HU/Draft Delivered"]).sum() / len(df) * 100, 2) if len(df) else 0
+            ]
+        })
+
+        # Read TV NOs with green fill from RR
+        rr_file.seek(0)
+        wb = load_workbook(filename=rr_file, data_only=True)
+        ws = wb["Export"]
+        green_tv_nos = [str(row[0].value).strip() for row in ws.iter_rows(min_row=2) if row[0].fill.start_color.rgb in ("FF92D050")]
+
+        # Filter and cross-check
+        rr_df = rr_df_full[
+            (rr_df_full["Tag delivered?"].str.strip() == "Yes") &
+            (rr_df_full["Applicant"].str.strip() == "SAESL") &
+            (rr_df_full["TV NO"].astype(str).str.strip().isin(green_tv_nos))
+        ].copy()
+
+        rr_df["Custom ID"] = rr_df["TV NO"].astype(str).str.strip()
+        df["Custom ID"] = df["Custom ID"].astype(str).str.strip()
+
+        rr_df["Your Status"] = rr_df["Custom ID"].map(df.set_index("Custom ID")["Delivery Type"].to_dict()).fillna("Not Found")
+        rr_df["Actual SAESL Status"] = rr_df["Custom ID"].map(df.set_index("Custom ID")["SAESL Status"].to_dict())
+
+        # RR discrepancies and breakdown
+        rr_discrepancies = rr_df[rr_df["Your Status"] == "Undelivered"][
+            ["Custom ID", "Gate", "Your Status", "Actual SAESL Status", "Tag delivered?"]
+        ].copy()
+        rr_discrepancies.columns = ["TV Number", "Gate", "Your Status", "Actual SAESL Status", "RR Tag Delivered"]
+
+        rr_gate_summary = rr_df.groupby("Gate").agg(RR_Tagged_Delivered=("Custom ID", "count")).reset_index()
+
+        true_status_breakdown = rr_df.groupby(["Gate", "Your Status"]).agg(Count=("Custom ID", "count")).reset_index()
+        true_status_pivot = true_status_breakdown.pivot(index="Gate", columns="Your Status", values="Count").fillna(0).reset_index()
+        true_status_pivot.columns.name = None
+
+        # Export to Excel
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            summary_all_df.to_excel(writer, sheet_name="Summary (All Tags)", index=False)
+            current_week_summary.to_excel(writer, sheet_name="Current Week Summary", index=False)
+            current_week_detail.to_excel(writer, sheet_name="Current Week ESN Detail", index=False)
+            delivery_type_breakdown.to_excel(writer, sheet_name="Delivery Breakdown", index=False)
+            gate_perf_all.to_excel(writer, sheet_name="Gate Perf (All TVs)", index=False)
+            rr_discrepancies.to_excel(writer, sheet_name="RR Discrepancy", index=False)
+            rr_gate_summary.to_excel(writer, sheet_name="RR Gate Summary", index=False)
+            true_status_pivot.to_excel(writer, sheet_name="RR True Delivery Breakdown", index=False)
+            df.to_excel(writer, sheet_name="Raw Data", index=False)
+
+        output.seek(0)
+        return output
+
+    except Exception as e:
+        import traceback
+        print("❌ Exception:", str(e))
+        traceback.print_exc()
+        raise
