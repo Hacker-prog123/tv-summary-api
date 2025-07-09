@@ -26,7 +26,7 @@ def run_tv_summary(main_file_bytes, rr_file_bytes):
 
         # --- Validate required columns ---
         required_tv_cols = ["Engine Number (Ex)", "Custom ID", "Gate", "TVR Gate Raised", "SAESL Status"]
-        required_rr_cols = ["Tag delivered?", "TV NO", "Applicant"]
+        required_rr_cols = ["Engine Serial Number", "Tag delivered?", "TV NO", "Applicant"]
 
         for col in required_tv_cols:
             if col not in df.columns:
@@ -37,7 +37,8 @@ def run_tv_summary(main_file_bytes, rr_file_bytes):
 
         # Apply ESN cleaning
         df["Engine Number (Ex)"] = df["Engine Number (Ex)"].map(clean_esn)
-    
+        rr_df_full["Engine Serial Number"] = rr_df_full["Engine Serial Number"].map(clean_esn)
+
         current_week_esns = pd.concat([esn_df[col] for col in esn_df.columns]).dropna().map(clean_esn).unique()
         df_current_week = df[df["Engine Number (Ex)"].isin(current_week_esns)].copy()
 
