@@ -6,17 +6,14 @@ def run_tv_summary(main_file_bytes, rr_file_bytes):
     main_file = BytesIO(main_file_bytes)
     rr_file = BytesIO(rr_file_bytes)
 
-    # === LOAD & STRIP COLUMNS ===
     df = pd.read_excel(main_file, sheet_name="TV")
-    df.columns = df.columns.str.strip()
-
     esn_df = pd.read_excel(main_file, sheet_name="ESN", usecols="B:E")
-    esn_df.columns = esn_df.columns.str.strip()
-
     rr_df_full = pd.read_excel(rr_file, sheet_name="Export")
+
+    # ✅ Fix for key errors on column names
+    df.columns = df.columns.str.strip()
     rr_df_full.columns = rr_df_full.columns.str.strip()
 
-    # === CLEAN ESNs ===
     def clean_esn(val):
         val = str(val).strip().replace("\n", "").replace("\r", "").replace("\xa0", "").replace(" ", "")
         if val.replace('.', '', 1).isdigit():
@@ -27,7 +24,6 @@ def run_tv_summary(main_file_bytes, rr_file_bytes):
     current_week_esns = pd.concat([esn_df[col] for col in esn_df.columns]).dropna().map(clean_esn).unique()
     df_current_week = df[df["Engine Number (Ex)"].isin(current_week_esns)].copy()
 
-    # === CLASSIFY DELIVERY TYPE ===
     def classify_delivery_type(row):
         status = str(row["SAESL Status"]).strip()
         gate = row.get("Gate", None)
@@ -52,7 +48,6 @@ def run_tv_summary(main_file_bytes, rr_file_bytes):
     df["Delivery Type"] = df.apply(classify_delivery_type, axis=1)
     df_current_week["ESN"] = df_current_week["Engine Number (Ex)"]
 
-    # === CURRENT WEEK SUMMARY ===
     current_week_summary = pd.DataFrame({
         "Metric": [
             "Total ESNs in Current Week", "TV Delivered", "HU/Draft Delivered", "Undelivered", "Delivery Rate (%)"
